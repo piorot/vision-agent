@@ -8,7 +8,7 @@ from fastapi import FastAPI, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 app = FastAPI()
 client = anthropic.AsyncAnthropic()  # reads ANTHROPIC_API_KEY
@@ -100,17 +100,32 @@ async def ask(image: UploadFile, question: str = Form(""), x_token: str | None =
 
 
 @app.post("/ask/base64")
-async def ask_base64(req: Base64Request, x_token: str | None = Header(None)):
+async def ask_base64(request: Request, x_token: str | None = Header(None)):
     check_token(x_token)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Request body is not valid JSON; send Content-Type: application/json with a body like {\"image_base64\": \"...\"}")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be a JSON object like {\"image_base64\": \"...\"}")
+    if "image_base64" not in body:
+        raise HTTPException(400, "Missing required field: image_base64")
+    try:
+        req = Base64Request(**body)
+    except ValidationError as e:
+        field = e.errors()[0]["loc"][0]
+        raise HTTPException(400, f"Field {field} must be a string")
     b64 = req.image_base64.strip()
     if b64.startswith("data:"):
         b64 = b64.partition(",")[2]
     b64 = re.sub(r"\s+", "", b64).replace("-", "+").replace("_", "/")  # tolerate line breaks, URL-safe
+    if not b64:
+        raise HTTPException(400, "image_base64 is empty")
     b64 += "=" * (-len(b64) % 4)
     try:
         data = base64.b64decode(b64, validate=True)
     except ValueError:
-        raise HTTPException(400, "image_base64 is not valid base64")
+        raise HTTPException(400, "image_base64 is not valid base64 (it contains invalid characters or is truncated)")
     return await answer_image(data, req.question)
 
 
