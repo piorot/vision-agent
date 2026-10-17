@@ -1,7 +1,9 @@
 import base64
 import json
+import logging
 import os
 import re
+import sys
 
 import anthropic
 from fastapi import FastAPI, Form, Header, HTTPException, Request, UploadFile
@@ -9,6 +11,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
+
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("vision-agent")
 
 app = FastAPI()
 client = anthropic.AsyncAnthropic()  # reads ANTHROPIC_API_KEY
@@ -26,6 +31,12 @@ SYSTEM = (
 
 
 MAX_BYTES = 5_000_000
+LOG_CHARS = 300
+
+
+def clip(text: str) -> str:
+    """One-line, length-capped repr for log output."""
+    return repr(text if len(text) <= LOG_CHARS else text[:LOG_CHARS] + "...")
 
 
 @app.exception_handler(RequestValidationError)
@@ -90,6 +101,7 @@ async def answer_image(data: bytes, question: str):
         result["vibrations"] = max(0, min(10, int(result.get("vibrations", 0))))
     except (ValueError, TypeError):
         result = {"answer": text, "vibrations": 0}
+    log.info("question=%s answer=%s vibrations=%s", clip(question), clip(str(result.get("answer", ""))), result["vibrations"])
     return result
 
 
