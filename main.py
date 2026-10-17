@@ -84,7 +84,7 @@ async def answer_image(data: bytes, question: str):
         )
     except anthropic.APIStatusError as e:
         raise HTTPException(502, f"Upstream model error ({e.status_code})")
-    text = msg.content[0].text.strip()
+    text = next((b.text for b in msg.content if b.type == "text"), "").strip()
     try:
         result = json.loads(text[text.index("{"): text.rindex("}") + 1])
         result["vibrations"] = max(0, min(10, int(result.get("vibrations", 0))))
