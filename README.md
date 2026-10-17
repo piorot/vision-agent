@@ -23,4 +23,4 @@ Remote call: `curl -H "X-Token: <APP_TOKEN>" -F image=@q.png https://<app>.fly.d
       -H "X-Token: <APP_TOKEN>" -H "Content-Type: application/json" \
       -d '{"image_base64": "<base64>", "media_type": "image/png", "question": "optional"}'
 
-`image_base64` may also be a `data:image/png;base64,...` URL, in which case `media_type` is optional.
+`image_base64` may also be a `data:image/...;base64,...` URL. Line breaks and URL-safe base64 are tolerated. `media_type` is optional and ignored: the real type (JPEG, PNG, GIF, WebP) is detected from the bytes. HEIC is not supported; convert to JPEG first.
