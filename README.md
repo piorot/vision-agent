@@ -17,3 +17,10 @@ FastAPI app: POST an image to `/ask`, Claude answers, the web page vibrates N ti
     fly open
 
 Remote call: `curl -H "X-Token: <APP_TOKEN>" -F image=@q.png https://<app>.fly.dev/ask`
+
+## Base64 input
+    curl -X POST https://<app>.fly.dev/ask/base64 \
+      -H "X-Token: <APP_TOKEN>" -H "Content-Type: application/json" \
+      -d '{"image_base64": "<base64>", "media_type": "image/png", "question": "optional"}'
+
+`image_base64` may also be a `data:image/png;base64,...` URL, in which case `media_type` is optional.
