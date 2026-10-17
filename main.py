@@ -1,10 +1,12 @@
 import base64
 import json
 import os
+import re
 
 import anthropic
-from fastapi import FastAPI, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -26,9 +28,29 @@ SYSTEM = (
 MAX_BYTES = 5_000_000
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    # Report where the problem is, without echoing the (possibly binary) request body.
+    problems = [{"loc": e["loc"], "msg": e["msg"]} for e in exc.errors()]
+    return JSONResponse({"detail": problems}, status_code=422)
+
+
+def sniff_media_type(data: bytes) -> str | None:
+    """Detect the real image type from magic bytes; client-supplied labels can be wrong."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 class Base64Request(BaseModel):
     image_base64: str
-    media_type: str | None = None  # inferred from a data: URL prefix if omitted
+    media_type: str | None = None  # optional hint; the real type is detected from the bytes
     question: str = ""
 
 
@@ -37,27 +59,31 @@ def check_token(x_token: str | None):
         raise HTTPException(401, "Bad token")
 
 
-async def answer_image(data: bytes, media_type: str, question: str):
+async def answer_image(data: bytes, question: str):
+    media_type = sniff_media_type(data)
     if media_type not in ALLOWED:
-        raise HTTPException(415, "Unsupported image type")
+        raise HTTPException(415, "Unsupported image type; send JPEG, PNG, GIF or WebP (convert HEIC to JPEG first)")
     if len(data) > MAX_BYTES:
         raise HTTPException(413, "Image too large (max 5MB)")
 
-    msg = await client.messages.create(
-        model=MODEL,
-        max_tokens=300,
-        system=SYSTEM,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": base64.b64encode(data).decode()}},
-                {"type": "text", "text": question or "Answer the question in the image."},
-            ],
-        }],
-    )
+    try:
+        msg = await client.messages.create(
+            model=MODEL,
+            max_tokens=300,
+            system=SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": base64.b64encode(data).decode()}},
+                    {"type": "text", "text": question or "Answer the question in the image."},
+                ],
+            }],
+        )
+    except anthropic.APIStatusError as e:
+        raise HTTPException(502, f"Upstream model error ({e.status_code})")
     text = msg.content[0].text.strip()
     try:
         result = json.loads(text[text.index("{"): text.rindex("}") + 1])
@@ -70,21 +96,22 @@ async def answer_image(data: bytes, media_type: str, question: str):
 @app.post("/ask")
 async def ask(image: UploadFile, question: str = Form(""), x_token: str | None = Header(None)):
     check_token(x_token)
-    return await answer_image(await image.read(), image.content_type, question)
+    return await answer_image(await image.read(), question)
 
 
 @app.post("/ask/base64")
 async def ask_base64(req: Base64Request, x_token: str | None = Header(None)):
     check_token(x_token)
-    b64, media_type = req.image_base64.strip(), req.media_type
+    b64 = req.image_base64.strip()
     if b64.startswith("data:"):
-        header, _, b64 = b64.partition(",")
-        media_type = media_type or header[5:].split(";")[0]
+        b64 = b64.partition(",")[2]
+    b64 = re.sub(r"\s+", "", b64).replace("-", "+").replace("_", "/")  # tolerate line breaks, URL-safe
+    b64 += "=" * (-len(b64) % 4)
     try:
         data = base64.b64decode(b64, validate=True)
     except ValueError:
-        raise HTTPException(400, "Invalid base64")
-    return await answer_image(data, media_type or "", req.question)
+        raise HTTPException(400, "image_base64 is not valid base64")
+    return await answer_image(data, req.question)
 
 
 @app.get("/healthz")
