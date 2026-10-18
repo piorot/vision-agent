@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import itertools
 import json
 import logging
 import os
@@ -8,7 +10,7 @@ import sys
 import anthropic
 from fastapi import FastAPI, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
@@ -29,6 +31,11 @@ SYSTEM = (
     "Otherwise: yes=2, no=1, multiple-choice A=1 B=2 C=3 D=4, anything else=0."
 )
 
+
+# Pages currently listening on /events. In-memory only, so this assumes a single machine.
+subscribers: set[asyncio.Queue] = set()
+answer_ids = itertools.count(1)
+KEEPALIVE_SECONDS = 25
 
 MAX_BYTES = 5_000_000
 LOG_CHARS = 300
@@ -101,8 +108,29 @@ async def answer_image(data: bytes, question: str):
         result["vibrations"] = max(0, min(10, int(result.get("vibrations", 0))))
     except (ValueError, TypeError):
         result = {"answer": text, "vibrations": 0}
+    result["id"] = next(answer_ids)
     log.info("question=%s answer=%s vibrations=%s", clip(question), clip(str(result.get("answer", ""))), result["vibrations"])
+    broadcast(result)
     return result
+
+
+def broadcast(result: dict):
+    """Push an answer to every open page."""
+    for q in subscribers:
+        q.put_nowait(result)
+
+
+async def event_stream(q: asyncio.Queue):
+    try:
+        while True:
+            try:
+                result = await asyncio.wait_for(q.get(), KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"  # keeps proxies from closing an idle connection
+                continue
+            yield f"data: {json.dumps(result)}\n\n"
+    finally:
+        subscribers.discard(q)
 
 
 @app.post("/ask")
@@ -139,6 +167,19 @@ async def ask_base64(request: Request, x_token: str | None = Header(None)):
     except ValueError:
         raise HTTPException(400, "image_base64 is not valid base64 (it contains invalid characters or is truncated)")
     return await answer_image(data, req.question)
+
+
+@app.get("/events")
+async def events(token: str | None = None):
+    # EventSource cannot send headers, so the token travels as a query parameter here.
+    check_token(token)
+    q: asyncio.Queue = asyncio.Queue()
+    subscribers.add(q)
+    return StreamingResponse(
+        event_stream(q),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/healthz")
