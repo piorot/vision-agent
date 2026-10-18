@@ -11,8 +11,9 @@
   #latest { margin-top: 1.5rem; text-align: center; }
   #latest[hidden] { display: none; }
   #pic { max-width: 100%; max-height: 50vh; border-radius: 8px; }
-  #big { font-size: 2.5rem; font-weight: 700; margin: .75rem 0 .25rem; overflow-wrap: anywhere; }
-  #dots { font-size: 1.5rem; letter-spacing: .3rem; min-height: 1.5rem; }
+  .big { font-size: 2.5rem; font-weight: 700; margin: .75rem 0 .25rem; overflow-wrap: anywhere; }
+  .dots { font-size: 1.5rem; letter-spacing: .3rem; min-height: 1.5rem; }
+  #awake { font-size: .85rem; color: #666; margin-top: 1rem; }
 </style>
 </head>
 <body>
@@ -24,35 +25,57 @@
   <div id="out"></div>
   <div id="latest" hidden>
     <img id="pic" alt="Latest image">
-    <div id="big"></div>
-    <div id="dots"></div>
+    <div id="answers"></div>
   </div>
+  <div id="awake"></div>
 <script>
 const out = document.getElementById("out");
 const tokenInput = document.getElementById("token");
 let lastId = null, source = null, pushActive = false;
 
-function render({ id, answer, vibrations, image_url }) {
+function render({ answers, image_url }) {
   // The image is only served once an answer has been broadcast, so it is shown from the event, not the /ask response.
   const sep = image_url ? (image_url.includes("?") ? "&" : "?") : "";
   if (image_url) document.getElementById("pic").src = image_url + sep + "token=" + encodeURIComponent(tokenInput.value);
-  document.getElementById("big").textContent = answer;
-  document.getElementById("dots").textContent = "●".repeat(vibrations) || "—";
+  const box = document.getElementById("answers");
+  box.replaceChildren(...answers.map((a) => {
+    const row = document.createElement("div");
+    const big = Object.assign(document.createElement("div"), { className: "big", textContent: a.answer });
+    const dots = Object.assign(document.createElement("div"), { className: "dots", textContent: "●".repeat(a.vibrations) || "—" });
+    row.append(big, dots);
+    return row;
+  }));
   document.getElementById("latest").hidden = false;
+}
+
+const PAUSE_MS = 10000; // between answers when several questions are in one image
+let buzzTimer = null;
+
+function buzz(answers, i = 0) {
+  navigator.vibrate(pulses(answers[i].vibrations));
+  if (i + 1 < answers.length) {
+    // The next answer starts PAUSE_MS after this one's buzz ends.
+    buzzTimer = setTimeout(() => buzz(answers, i + 1), answers[i].vibrations * 500 + PAUSE_MS);
+  }
+}
+
+function pulses(n) {
+  const pattern = [];
+  for (let i = 0; i < n; i++) pattern.push(300, 200); // 300ms on, 200ms off
+  return pattern;
 }
 
 function show(a) {
   if (a.id === lastId) return; // the asking page also gets the broadcast; handle each answer once
   lastId = a.id;
+  clearTimeout(buzzTimer); // a new image supersedes the remaining buzzes of the old one
+  navigator.vibrate?.(0);
   render(a);
   if (a.replay) return; // a page that just opened shows the last answer without vibrating
-  const { answer, vibrations } = a;
-  out.textContent = `Answer: ${answer}\nVibrations: ${vibrations}`;
-  if (pushActive) return; // the push notification vibrates this device, including with the page closed
+  out.textContent = a.answers.map((x, i) => `${a.answers.length > 1 ? i + 1 + ". " : ""}Answer: ${x.answer} (${x.vibrations} vibrations)`).join("\n");
+  if (pushActive) return; // the push notifications vibrate this device, including with the page closed
   if (!navigator.vibrate) { out.textContent += "\n(Vibration not supported on this device/browser)"; return; }
-  const pattern = [];
-  for (let i = 0; i < vibrations; i++) pattern.push(300, 200); // 300ms on, 200ms off
-  navigator.vibrate(pattern);
+  buzz(a.answers);
 }
 
 function listen() {
@@ -106,9 +129,25 @@ async function setupPush(ask) {
   } catch (e) { out.textContent = "Push setup failed: " + e.message; }
 }
 
+// Keep the screen on while this page is visible. The browser drops the lock when the tab is hidden, so take it again.
+let wakeLock = null;
+async function keepAwake() {
+  const note = document.getElementById("awake");
+  if (!("wakeLock" in navigator)) { note.textContent = "This browser can't keep the screen on; adjust the phone's screen timeout."; return; }
+  if (document.visibilityState !== "visible" || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+    note.textContent = "Screen will stay on while this page is open.";
+  } catch (e) { note.textContent = "Could not keep the screen on (battery saver?): " + e.message; }
+}
+document.addEventListener("visibilitychange", keepAwake);
+keepAwake();
+
 // A tap is required before browsers allow notifications or vibration; it also gives a test buzz.
 document.getElementById("enable").onclick = () => {
   listen();
+  keepAwake();
   if (navigator.vibrate) navigator.vibrate(200);
   setupPush(true);
 };

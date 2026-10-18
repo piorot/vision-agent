@@ -32,11 +32,14 @@ MAX_SUBSCRIPTIONS = 50
 ALLOWED = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 SYSTEM = (
-    "You answer the question shown in the image. Reply with ONLY a JSON object: "
-    '{"answer": "<short answer>", "vibrations": <integer 0-10>}. '
-    "If the answer is a number from 0 to 10, vibrations equals that number. "
+    "You answer the question(s) shown in the image. Reply with ONLY a JSON object: "
+    '{"answers": [{"answer": "<short answer>", "vibrations": <integer 0-10>}]}, '
+    "with one entry per question, in the order they appear (a single question gives a single entry). "
+    "If an answer is a number from 0 to 10, vibrations equals that number. "
     "Otherwise: yes=2, no=1, multiple-choice A=1 B=2 C=3 D=4, anything else=0."
 )
+MAX_ANSWERS = 10
+PAUSE_SECONDS = float(os.getenv("VIBRATION_PAUSE_SECONDS", "10"))  # gap between answers when buzzing
 
 
 # Pages currently listening on /events. In-memory only, so this assumes a single machine.
@@ -63,7 +66,7 @@ def save_subscriptions():
 
 
 subscriptions: dict[str, dict] = load_subscriptions()  # Web Push endpoint -> subscription
-push_tasks: set[asyncio.Task] = set()
+push_task: asyncio.Task | None = None  # buzz sequence for the newest image
 
 MAX_BYTES = 5_000_000
 LOG_CHARS = 300
@@ -105,6 +108,22 @@ def check_token(x_token: str | None):
         raise HTTPException(401, "Bad token")
 
 
+def parse_answers(text: str) -> list[dict]:
+    """Normalize the model reply into [{answer, vibrations}], tolerating the older single-answer shape."""
+    try:
+        data = json.loads(text[text.index("{"): text.rindex("}") + 1])
+        items = data["answers"] if isinstance(data.get("answers"), list) else [data]
+        answers = [
+            {"answer": str(i.get("answer", "")), "vibrations": max(0, min(10, int(i.get("vibrations", 0))))}
+            for i in items if isinstance(i, dict)
+        ][:MAX_ANSWERS]
+        if answers:
+            return answers
+    except (ValueError, TypeError):
+        pass
+    return [{"answer": text, "vibrations": 0}]
+
+
 async def answer_image(data: bytes, question: str):
     media_type = sniff_media_type(data)
     if media_type not in ALLOWED:
@@ -115,7 +134,7 @@ async def answer_image(data: bytes, question: str):
     try:
         msg = await client.messages.create(
             model=MODEL,
-            max_tokens=300,
+            max_tokens=800,
             system=SYSTEM,
             messages=[{
                 "role": "user",
@@ -131,13 +150,15 @@ async def answer_image(data: bytes, question: str):
     except anthropic.APIStatusError as e:
         raise HTTPException(502, f"Upstream model error ({e.status_code})")
     text = next((b.text for b in msg.content if b.type == "text"), "").strip()
-    try:
-        result = json.loads(text[text.index("{"): text.rindex("}") + 1])
-        result["vibrations"] = max(0, min(10, int(result.get("vibrations", 0))))
-    except (ValueError, TypeError):
-        result = {"answer": text, "vibrations": 0}
-    result["id"] = next(answer_ids)
-    log.info("question=%s answer=%s vibrations=%s", clip(question), clip(str(result.get("answer", ""))), result["vibrations"])
+    answers = parse_answers(text)
+    # "answer"/"vibrations" mirror the first answer's count for single-question callers; "answers" has them all.
+    result = {
+        "id": next(answer_ids),
+        "answers": answers,
+        "answer": " | ".join(a["answer"] for a in answers),
+        "vibrations": answers[0]["vibrations"],
+    }
+    log.info("question=%s answers=%s", clip(question), clip(json.dumps(answers)))
     broadcast(result, data, media_type)
     return result
 
@@ -149,9 +170,10 @@ def broadcast(result: dict, image: bytes, media_type: str):
     latest = {"event": event, "image": image, "media_type": media_type}
     for q in subscribers:
         q.put_nowait(event)
-    task = asyncio.get_running_loop().create_task(push_all(event))
-    push_tasks.add(task)  # keep a reference so it is not garbage-collected mid-flight
-    task.add_done_callback(push_tasks.discard)
+    global push_task
+    if push_task and not push_task.done():
+        push_task.cancel()  # a new image makes the old answers' remaining buzzes stale
+    push_task = asyncio.get_running_loop().create_task(push_all(event))
 
 
 def send_one(sub: dict, payload: str) -> bool:
@@ -171,21 +193,28 @@ def send_one(sub: dict, payload: str) -> bool:
 
 
 async def push_all(event: dict):
-    """Notify every subscribed device, including ones whose page is closed."""
+    """Notify every subscribed device, including ones whose page is closed.
+
+    One push per answer, spaced PAUSE_SECONDS apart: Android caps the length of a single
+    vibration pattern, so the pause is timed here instead of inside one long pattern.
+    """
     if not (VAPID_PRIVATE_KEY and subscriptions):
         return
-    payload = json.dumps({
-        "id": event["id"],
-        "answer": str(event.get("answer", ""))[:200],
-        "vibrations": event["vibrations"],
-    })
-    subs = list(subscriptions.values())
-    alive = await asyncio.gather(*(asyncio.to_thread(send_one, sub, payload) for sub in subs))
-    gone = [sub["endpoint"] for sub, ok in zip(subs, alive) if not ok]
-    if gone:
-        for endpoint in gone:
-            subscriptions.pop(endpoint, None)
-        save_subscriptions()
+    answers = event["answers"]
+    for i, a in enumerate(answers):
+        if i:  # the pause starts when the previous buzz ends (300ms on + 200ms off per pulse)
+            await asyncio.sleep(PAUSE_SECONDS + answers[i - 1]["vibrations"] * 0.5)
+        payload = json.dumps({
+            "id": event["id"], "answer": a["answer"][:200], "vibrations": a["vibrations"],
+            "index": i, "total": len(answers),
+        })
+        subs = list(subscriptions.values())
+        alive = await asyncio.gather(*(asyncio.to_thread(send_one, sub, payload) for sub in subs))
+        gone = [sub["endpoint"] for sub, ok in zip(subs, alive) if not ok]
+        if gone:
+            for endpoint in gone:
+                subscriptions.pop(endpoint, None)
+            save_subscriptions()
 
 
 async def event_stream(q: asyncio.Queue):
