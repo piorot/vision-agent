@@ -20,7 +20,7 @@
   <input id="token" type="password" placeholder="Access token (if set)">
   <input id="file" type="file" accept="image/*" capture="environment">
   <button id="go">Ask</button>
-  <button id="enable">Enable vibration</button>
+  <button id="enable">Enable vibration alerts</button>
   <div id="out"></div>
   <div id="latest" hidden>
     <img id="pic" alt="Latest image">
@@ -30,7 +30,7 @@
 <script>
 const out = document.getElementById("out");
 const tokenInput = document.getElementById("token");
-let lastId = null, source = null;
+let lastId = null, source = null, pushActive = false;
 
 function render({ id, answer, vibrations, image_url }) {
   // The image is only served once an answer has been broadcast, so it is shown from the event, not the /ask response.
@@ -48,6 +48,7 @@ function show(a) {
   if (a.replay) return; // a page that just opened shows the last answer without vibrating
   const { answer, vibrations } = a;
   out.textContent = `Answer: ${answer}\nVibrations: ${vibrations}`;
+  if (pushActive) return; // the push notification vibrates this device, including with the page closed
   if (!navigator.vibrate) { out.textContent += "\n(Vibration not supported on this device/browser)"; return; }
   const pattern = [];
   for (let i = 0; i < vibrations; i++) pattern.push(300, 200); // 300ms on, 200ms off
@@ -60,12 +61,58 @@ function listen() {
   source.onmessage = (e) => show(JSON.parse(e.data));
 }
 
-// A tap is required before browsers allow vibration; it also gives a test buzz.
+function keyBytes(b64url) {
+  const b64 = (b64url + "=".repeat((4 - b64url.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+// Web Push is what lets a phone vibrate with this page closed or in the background.
+async function enablePush(ask) {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) return "unsupported";
+  const kr = await fetch("/push/key?token=" + encodeURIComponent(tokenInput.value));
+  if (!kr.ok) return "unavailable";
+  const { key } = await kr.json();
+  if (Notification.permission === "default" && ask) await Notification.requestPermission();
+  if (Notification.permission !== "granted") return "denied";
+  const reg = await navigator.serviceWorker.register("/sw.js");
+  await navigator.serviceWorker.ready;
+  const want = keyBytes(key);
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && String(new Uint8Array(sub.options.applicationServerKey)) !== String(want)) {
+    await sub.unsubscribe(); // the server's VAPID key changed
+    sub = null;
+  }
+  sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+  const r = await fetch("/push/subscribe", {
+    method: "POST", body: JSON.stringify(sub),
+    headers: { "Content-Type": "application/json", "X-Token": tokenInput.value },
+  });
+  return r.ok ? "ok" : "failed";
+}
+
+const PUSH_MESSAGES = {
+  ok: "Alerts on: this device vibrates for every new image, even with the page closed.",
+  unsupported: "This browser can't do background alerts. (iPhones can't vibrate from a web page at all.)",
+  unavailable: "The server has no push keys set up, so vibration works only while this page is open.",
+  denied: "Notifications are blocked for this site. Allow them in the browser's site settings.",
+  failed: "Could not register this device for alerts.",
+};
+
+async function setupPush(ask) {
+  try {
+    const result = await enablePush(ask);
+    pushActive = result === "ok";
+    if (ask || pushActive) out.textContent = PUSH_MESSAGES[result] ?? result;
+  } catch (e) { out.textContent = "Push setup failed: " + e.message; }
+}
+
+// A tap is required before browsers allow notifications or vibration; it also gives a test buzz.
 document.getElementById("enable").onclick = () => {
   listen();
   if (navigator.vibrate) navigator.vibrate(200);
-  else out.textContent = "Vibration not supported on this device/browser";
+  setupPush(true);
 };
+if (window.Notification && Notification.permission === "granted") setupPush(false); // re-register after a deploy
 listen();
 
 document.getElementById("go").onclick = async () => {
