@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import sys
 
@@ -190,7 +191,7 @@ def test_push_all_sends_and_prunes_gone_subscriptions(push, monkeypatch):
         return sub["endpoint"] != gone["endpoint"]
 
     monkeypatch.setattr(main, "send_one", fake_send)
-    asyncio.run(main.push_all({"id": 7, "answer": "yes", "vibrations": 2}))
+    asyncio.run(main.push_all({"id": 7, "answers": [{"answer": "yes", "vibrations": 2}]}))
     assert len(sent) == 2
     assert '"vibrations": 2' in sent[0][1]
     assert list(main.subscriptions) == [SUB["endpoint"]]
@@ -218,7 +219,7 @@ def test_broadcast_schedules_push(monkeypatch):
     monkeypatch.setattr(main, "push_all", fake_push_all)
 
     async def run():
-        main.broadcast({"id": 5, "answer": "x", "vibrations": 1}, PNG, "image/png")
+        main.broadcast({"id": 5, "answers": [{"answer": "x", "vibrations": 1}]}, PNG, "image/png")
         await asyncio.sleep(0)
 
     asyncio.run(run())
@@ -229,3 +230,54 @@ def test_service_worker_served(client):
     r = client.get("/sw.js")
     assert r.status_code == 200 and "showNotification" in r.text
     assert "javascript" in r.headers["content-type"]
+
+
+MULTI = '{"answers": [{"answer": "A", "vibrations": 1}, {"answer": "C", "vibrations": 3}, {"answer": "7", "vibrations": 12}]}'
+
+
+def test_parse_answers_multiple_clamped_and_legacy():
+    assert main.parse_answers(MULTI) == [
+        {"answer": "A", "vibrations": 1}, {"answer": "C", "vibrations": 3}, {"answer": "7", "vibrations": 10},
+    ]
+    assert main.parse_answers('{"answer": "yes", "vibrations": 2}') == [{"answer": "yes", "vibrations": 2}]
+    assert main.parse_answers("no json here") == [{"answer": "no json here", "vibrations": 0}]
+    assert main.parse_answers('{"answers": []}') == [{"answer": '{"answers": []}', "vibrations": 0}]
+
+
+def test_ask_returns_every_answer(client, monkeypatch):
+    class Multi:
+        async def create(self, **kwargs):
+            class Msg:
+                content = [type("B", (), {"type": "text", "text": MULTI})()]
+            return Msg()
+
+    monkeypatch.setattr(main.client, "messages", Multi())
+    body = post(client, json={"image_base64": base64.b64encode(PNG).decode()}).json()
+    assert [a["vibrations"] for a in body["answers"]] == [1, 3, 10]
+    assert body["answer"] == "A | C | 7" and body["vibrations"] == 1
+
+
+def test_push_all_pauses_between_answers_and_new_image_cancels(push, monkeypatch):
+    import asyncio
+    main.subscriptions[SUB["endpoint"]] = SUB
+    monkeypatch.setattr(main, "PAUSE_SECONDS", 0.05)
+    sent = []
+    monkeypatch.setattr(main, "send_one", lambda sub, payload: sent.append(json.loads(payload)) or True)
+    event = {"id": 1, "answers": [{"answer": "A", "vibrations": 1}, {"answer": "C", "vibrations": 3}]}
+
+    async def run():
+        t0 = asyncio.get_running_loop().time()
+        await main.push_all(event)
+        assert asyncio.get_running_loop().time() - t0 >= 0.05
+        sent.clear()
+        monkeypatch.setattr(main, "PAUSE_SECONDS", 5)
+        main.broadcast(event, PNG, "image/png")  # starts a slow sequence
+        await asyncio.sleep(0.05)
+        first = main.push_task
+        main.broadcast({**event, "id": 2}, PNG, "image/png")  # a newer image supersedes it
+        await asyncio.sleep(0.05)
+        assert first.cancelled()
+        main.push_task.cancel()
+
+    asyncio.run(run())
+    assert [(m["id"], m["index"], m["total"]) for m in sent] == [(1, 0, 2), (2, 0, 2)]

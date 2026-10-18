@@ -40,3 +40,9 @@ One-time setup:
     fly deploy
 
 Device subscriptions are saved to `$DATA_DIR/push_subscriptions.json` (the `/data` volume on Fly), so they survive deploys. Keep the VAPID keys stable: new keys invalidate every subscription (pages re-subscribe when opened). Without the keys, push is off and the page falls back to vibrating while it is open. Locally, `pip install -r requirements.txt` needs `pip install "setuptools<80" wheel && pip install --no-build-isolation http-ece` first (see the Dockerfile).
+
+## Several questions in one image
+The model returns one answer per question. `/ask` responds with `answers: [{answer, vibrations}, ...]` (`answer` joins them with ` | `; `vibrations` is the first answer's count, for single-question callers). Each answer is buzzed in turn with a pause of `VIBRATION_PAUSE_SECONDS` (default 10) after the previous buzz ends. With Web Push this is one notification per answer sent by the server on that schedule, because Android caps the length of a single vibration pattern; an open page without push does the same with timers. A newer image cancels the remaining buzzes of the older one.
+
+## Keeping the screen on
+The page asks the browser (Screen Wake Lock API) to keep the screen on while it is open, and takes the lock again whenever the tab becomes visible. It cannot override the power button, battery saver, or a different app in front, so keep the tab in the foreground.
