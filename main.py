@@ -33,10 +33,12 @@ ALLOWED = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 SYSTEM = (
     "You answer the question(s) shown in the image. Reply with ONLY a JSON object: "
-    '{"answers": [{"answer": "<short answer>", "vibrations": <integer 0-10>}]}, '
-    "with one entry per question, in the order they appear (a single question gives a single entry). "
+    '{"answers": [{"answer": "<short answer>", "vibrations": <integer 0-10>}]}. '
+    "Give one entry per answer to be buzzed, in order: one per question, and when a question has several "
+    "correct options (select all that apply) one entry per correct option, in the order they are listed. "
+    "Never put several options in one entry. "
     "If an answer is a number from 0 to 10, vibrations equals that number. "
-    "Otherwise: yes=2, no=1, multiple-choice A=1 B=2 C=3 D=4, anything else=0."
+    "Otherwise: yes=2, no=1, multiple-choice option A=1 B=2 C=3 D=4 E=5 F=6 G=7 H=8 I=9 J=10, anything else=0."
 )
 MAX_ANSWERS = 10
 PAUSE_SECONDS = float(os.getenv("VIBRATION_PAUSE_SECONDS", "10"))  # gap between answers when buzzing
@@ -108,6 +110,20 @@ def check_token(x_token: str | None):
         raise HTTPException(401, "Bad token")
 
 
+LETTER_LIST = re.compile(r"\s*[A-J](?:\s*(?:,|/|&|and)\s*[A-J])+\s*", re.I)
+
+
+def split_letter_lists(answers: list[dict]) -> list[dict]:
+    """Safety net: turn an entry like "B, C, E" into one entry per option (B=2, C=3, E=5)."""
+    out = []
+    for a in answers:
+        if LETTER_LIST.fullmatch(a["answer"]):
+            out += [{"answer": c.upper(), "vibrations": ord(c.upper()) - 64} for c in re.split(r"\s*(?:,|/|&|\band\b)\s*", a["answer"].strip(), flags=re.I)]
+        else:
+            out.append(a)
+    return out
+
+
 def parse_answers(text: str) -> list[dict]:
     """Normalize the model reply into [{answer, vibrations}], tolerating the older single-answer shape."""
     try:
@@ -116,7 +132,8 @@ def parse_answers(text: str) -> list[dict]:
         answers = [
             {"answer": str(i.get("answer", "")), "vibrations": max(0, min(10, int(i.get("vibrations", 0))))}
             for i in items if isinstance(i, dict)
-        ][:MAX_ANSWERS]
+        ]
+        answers = split_letter_lists(answers)[:MAX_ANSWERS]
         if answers:
             return answers
     except (ValueError, TypeError):

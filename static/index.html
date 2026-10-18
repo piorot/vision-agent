@@ -28,6 +28,7 @@
     <div id="answers"></div>
   </div>
   <div id="awake"></div>
+  <div id="tap" hidden>Tap anywhere once: after a reload the browser won't let this page vibrate until you do.</div>
 <script>
 const out = document.getElementById("out");
 const tokenInput = document.getElementById("token");
@@ -143,6 +144,13 @@ async function keepAwake() {
 }
 document.addEventListener("visibilitychange", keepAwake);
 keepAwake();
+
+// Chrome blocks navigator.vibrate on a page nobody has tapped yet (e.g. right after a reload).
+const tapNote = document.getElementById("tap");
+if (navigator.vibrate && !navigator.userActivation?.hasBeenActive) {
+  tapNote.hidden = false;
+  addEventListener("pointerdown", () => { tapNote.hidden = true; }, { once: true });
+}
 
 // A tap is required before browsers allow notifications or vibration; it also gives a test buzz.
 document.getElementById("enable").onclick = () => {
