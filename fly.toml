@@ -13,7 +13,7 @@ primary_region = 'ams'
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1  # keep one machine up: /events listeners live in its memory
 
 [[vm]]
   size = 'shared-cpu-1x'

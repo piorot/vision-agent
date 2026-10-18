@@ -16,7 +16,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 class FakeMessages:
     async def create(self, **kwargs):
         class Msg:
-            content = [type("B", (), {"text": '{"answer": "yes", "vibrations": 2}'})()]
+            content = [type("B", (), {"type": "text", "text": '{"answer": "yes", "vibrations": 2}'})()]
         return Msg()
 
 
@@ -76,3 +76,38 @@ def test_unsupported_image(client):
     r = post(client, json={"image_base64": base64.b64encode(b"hello world").decode()})
     assert r.status_code == 415
     assert "Unsupported image type" in r.json()["detail"]
+
+
+def test_answer_is_broadcast_to_subscribers(client):
+    import asyncio
+    q = asyncio.Queue()
+    main.subscribers.add(q)
+    try:
+        r = post(client, json={"image_base64": base64.b64encode(PNG).decode()})
+    finally:
+        main.subscribers.discard(q)
+    msg = q.get_nowait()
+    assert msg["vibrations"] == 2
+    assert msg["id"] == r.json()["id"]
+
+
+def test_event_stream_formats_and_cleans_up():
+    import asyncio
+
+    async def run():
+        q = asyncio.Queue()
+        main.subscribers.add(q)
+        gen = main.event_stream(q)
+        q.put_nowait({"id": 1, "answer": "yes", "vibrations": 2})
+        chunk = await gen.__anext__()
+        await gen.aclose()
+        return chunk
+
+    chunk = asyncio.run(run())
+    assert chunk.startswith("data: ") and '"vibrations": 2' in chunk
+    assert not main.subscribers
+
+
+def test_events_requires_token(monkeypatch):
+    monkeypatch.setattr(main, "APP_TOKEN", "secret")
+    assert TestClient(main.app).get("/events?token=wrong").status_code == 401
