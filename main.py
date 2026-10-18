@@ -166,7 +166,7 @@ async def answer_image(data: bytes, question: str):
 def broadcast(result: dict, image: bytes, media_type: str):
     """Remember the newest answer + image and push the answer to every open page."""
     global latest
-    event = {**result, "image_url": f"/latest-image?id={result['id']}"}
+    event = {**result, "image_url": f"/latest-image?id={result['id']}", "pause_seconds": PAUSE_SECONDS}
     latest = {"event": event, "image": image, "media_type": media_type}
     for q in subscribers:
         q.put_nowait(event)

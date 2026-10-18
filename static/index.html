@@ -48,14 +48,14 @@ function render({ answers, image_url }) {
   document.getElementById("latest").hidden = false;
 }
 
-const PAUSE_MS = 10000; // between answers when several questions are in one image
 let buzzTimer = null;
 
-function buzz(answers, i = 0) {
+// pauseMs comes from the server (VIBRATION_PAUSE_SECONDS) so the page and the push notifications agree.
+function buzz(answers, pauseMs, i = 0) {
   navigator.vibrate(pulses(answers[i].vibrations));
   if (i + 1 < answers.length) {
-    // The next answer starts PAUSE_MS after this one's buzz ends.
-    buzzTimer = setTimeout(() => buzz(answers, i + 1), answers[i].vibrations * 500 + PAUSE_MS);
+    // The next answer starts pauseMs after this one's buzz ends.
+    buzzTimer = setTimeout(() => buzz(answers, pauseMs, i + 1), answers[i].vibrations * 500 + pauseMs);
   }
 }
 
@@ -75,7 +75,7 @@ function show(a) {
   out.textContent = a.answers.map((x, i) => `${a.answers.length > 1 ? i + 1 + ". " : ""}Answer: ${x.answer} (${x.vibrations} vibrations)`).join("\n");
   if (pushActive) return; // the push notifications vibrate this device, including with the page closed
   if (!navigator.vibrate) { out.textContent += "\n(Vibration not supported on this device/browser)"; return; }
-  buzz(a.answers);
+  buzz(a.answers, (a.pause_seconds ?? 10) * 1000);
 }
 
 function listen() {

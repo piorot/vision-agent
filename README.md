@@ -46,3 +46,10 @@ The model returns one answer per question. `/ask` responds with `answers: [{answ
 
 ## Keeping the screen on
 The page asks the browser (Screen Wake Lock API) to keep the screen on while it is open, and takes the lock again whenever the tab becomes visible. It cannot override the power button, battery saver, or a different app in front, so keep the tab in the foreground.
+
+## Automatic deploys
+Every push to `main` runs the tests and then `fly deploy` (`.github/workflows/deploy.yml`). One-time setup: create a deploy token and add it as the repository secret `FLY_API_TOKEN`:
+
+    fly tokens create deploy -a vision-agent
+
+(GitHub repo → Settings → Secrets and variables → Actions → New repository secret.) Fly secrets (API key, VAPID keys) and the `vision_data` volume stay as set up before; the workflow only ships the code.
