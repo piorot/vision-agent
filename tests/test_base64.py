@@ -299,3 +299,21 @@ def test_broadcast_event_carries_configured_pause(monkeypatch):
         main.subscribers.discard(q)
     assert q.get_nowait()["pause_seconds"] == 5.0
     assert main.latest["event"]["pause_seconds"] == 5.0  # replayed to pages that open later
+
+
+def test_select_all_answer_is_split_per_option():
+    # The live bug: "B, C, E" came back as a single answer with 0 vibrations, so nothing buzzed.
+    got = main.parse_answers('{"answers": [{"answer": "B, C, E", "vibrations": 0}]}')
+    assert got == [
+        {"answer": "B", "vibrations": 2}, {"answer": "C", "vibrations": 3}, {"answer": "E", "vibrations": 5},
+    ]
+    assert main.parse_answers('{"answers": [{"answer": "a and d", "vibrations": 0}]}') == [
+        {"answer": "A", "vibrations": 1}, {"answer": "D", "vibrations": 4},
+    ]
+    # Ordinary answers are left alone, including a single letter or a word that starts with a letter.
+    for ok in ("B", "yes", "AB testing", "Paris, France"):
+        assert main.parse_answers('{"answers": [{"answer": "%s", "vibrations": 2}]}' % ok)[0]["answer"] == ok
+
+
+def test_prompt_asks_for_one_entry_per_correct_option():
+    assert "select all that apply" in main.SYSTEM and "E=5" in main.SYSTEM
