@@ -8,6 +8,11 @@
   body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 16px; }
   button, input { font-size: 1rem; padding: .6rem; width: 100%; margin: .4rem 0; box-sizing: border-box; }
   #out { font-size: 1.2rem; margin-top: 1rem; white-space: pre-wrap; }
+  #latest { margin-top: 1.5rem; text-align: center; }
+  #latest[hidden] { display: none; }
+  #pic { max-width: 100%; max-height: 50vh; border-radius: 8px; }
+  #big { font-size: 2.5rem; font-weight: 700; margin: .75rem 0 .25rem; overflow-wrap: anywhere; }
+  #dots { font-size: 1.5rem; letter-spacing: .3rem; min-height: 1.5rem; }
 </style>
 </head>
 <body>
@@ -17,14 +22,31 @@
   <button id="go">Ask</button>
   <button id="enable">Enable vibration</button>
   <div id="out"></div>
+  <div id="latest" hidden>
+    <img id="pic" alt="Latest image">
+    <div id="big"></div>
+    <div id="dots"></div>
+  </div>
 <script>
 const out = document.getElementById("out");
 const tokenInput = document.getElementById("token");
 let lastId = null, source = null;
 
-function show({ id, answer, vibrations }) {
-  if (id === lastId) return; // the asking page also gets the broadcast; handle each answer once
-  lastId = id;
+function render({ id, answer, vibrations, image_url }) {
+  // The image is only served once an answer has been broadcast, so it is shown from the event, not the /ask response.
+  const sep = image_url ? (image_url.includes("?") ? "&" : "?") : "";
+  if (image_url) document.getElementById("pic").src = image_url + sep + "token=" + encodeURIComponent(tokenInput.value);
+  document.getElementById("big").textContent = answer;
+  document.getElementById("dots").textContent = "●".repeat(vibrations) || "—";
+  document.getElementById("latest").hidden = false;
+}
+
+function show(a) {
+  if (a.id === lastId) return; // the asking page also gets the broadcast; handle each answer once
+  lastId = a.id;
+  render(a);
+  if (a.replay) return; // a page that just opened shows the last answer without vibrating
+  const { answer, vibrations } = a;
   out.textContent = `Answer: ${answer}\nVibrations: ${vibrations}`;
   if (!navigator.vibrate) { out.textContent += "\n(Vibration not supported on this device/browser)"; return; }
   const pattern = [];
@@ -58,7 +80,8 @@ document.getElementById("go").onclick = async () => {
       headers: { "X-Token": tokenInput.value },
     });
     if (!r.ok) throw new Error(r.status + " " + (await r.text()));
-    show(await r.json());
+    const a = await r.json();
+    show({ ...a, image_url: `/latest-image?id=${a.id}` }); // same shape as the broadcast event
   } catch (e) { out.textContent = "Error: " + e.message; }
 };
 </script>

@@ -27,3 +27,5 @@ Remote call: `curl -H "X-Token: <APP_TOKEN>" -F image=@q.png https://<app>.fly.d
 
 ## Live broadcast
 Open pages subscribe to `GET /events` (Server-Sent Events, `?token=<APP_TOKEN>` if set). Every answer is pushed to all of them. Subscribers are held in memory, so run a single machine (`fly scale count 1`). iOS has no `navigator.vibrate`; on Android the page must have been tapped once and be in the foreground.
+
+The newest image and answer are kept in memory only (nothing is stored on disk). Each page shows them large, and a page that opens later sees the last answer without vibrating. The image is served from `GET /latest-image` (`?token=` if `APP_TOKEN` is set); it is lost on restart.
