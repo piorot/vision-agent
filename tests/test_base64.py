@@ -281,3 +281,21 @@ def test_push_all_pauses_between_answers_and_new_image_cancels(push, monkeypatch
 
     asyncio.run(run())
     assert [(m["id"], m["index"], m["total"]) for m in sent] == [(1, 0, 2), (2, 0, 2)]
+
+
+def test_broadcast_event_carries_configured_pause(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(main, "PAUSE_SECONDS", 5.0)
+    monkeypatch.setattr(main, "push_all", lambda event: asyncio.sleep(0))
+    q = asyncio.Queue()
+    main.subscribers.add(q)
+
+    async def run():
+        main.broadcast({"id": 9, "answers": [{"answer": "x", "vibrations": 1}]}, PNG, "image/png")
+
+    try:
+        asyncio.run(run())
+    finally:
+        main.subscribers.discard(q)
+    assert q.get_nowait()["pause_seconds"] == 5.0
+    assert main.latest["event"]["pause_seconds"] == 5.0  # replayed to pages that open later
