@@ -10,7 +10,7 @@ import sys
 import anthropic
 from fastapi import FastAPI, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
@@ -35,6 +35,7 @@ SYSTEM = (
 # Pages currently listening on /events. In-memory only, so this assumes a single machine.
 subscribers: set[asyncio.Queue] = set()
 answer_ids = itertools.count(1)
+latest: dict | None = None  # {"event": {...}, "image": bytes, "media_type": str}; only the newest is kept
 KEEPALIVE_SECONDS = 25
 
 MAX_BYTES = 5_000_000
@@ -110,14 +111,17 @@ async def answer_image(data: bytes, question: str):
         result = {"answer": text, "vibrations": 0}
     result["id"] = next(answer_ids)
     log.info("question=%s answer=%s vibrations=%s", clip(question), clip(str(result.get("answer", ""))), result["vibrations"])
-    broadcast(result)
+    broadcast(result, data, media_type)
     return result
 
 
-def broadcast(result: dict):
-    """Push an answer to every open page."""
+def broadcast(result: dict, image: bytes, media_type: str):
+    """Remember the newest answer + image and push the answer to every open page."""
+    global latest
+    event = {**result, "image_url": f"/latest-image?id={result['id']}"}
+    latest = {"event": event, "image": image, "media_type": media_type}
     for q in subscribers:
-        q.put_nowait(result)
+        q.put_nowait(event)
 
 
 async def event_stream(q: asyncio.Queue):
@@ -174,12 +178,23 @@ async def events(token: str | None = None):
     # EventSource cannot send headers, so the token travels as a query parameter here.
     check_token(token)
     q: asyncio.Queue = asyncio.Queue()
+    if latest:
+        q.put_nowait({**latest["event"], "replay": True})  # new pages see the last answer without vibrating
     subscribers.add(q)
     return StreamingResponse(
         event_stream(q),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/latest-image")
+async def latest_image(token: str | None = None):
+    # <img> cannot send headers, so the token travels as a query parameter here too.
+    check_token(token)
+    if not latest:
+        raise HTTPException(404, "No image yet")
+    return Response(latest["image"], media_type=latest["media_type"], headers={"Cache-Control": "no-store"})
 
 
 @app.get("/healthz")

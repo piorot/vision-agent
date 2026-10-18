@@ -111,3 +111,29 @@ def test_event_stream_formats_and_cleans_up():
 def test_events_requires_token(monkeypatch):
     monkeypatch.setattr(main, "APP_TOKEN", "secret")
     assert TestClient(main.app).get("/events?token=wrong").status_code == 401
+
+
+def test_latest_image_and_replay(client):
+    import asyncio
+    main.latest = None
+    assert client.get("/latest-image").status_code == 404
+    r = post(client, json={"image_base64": base64.b64encode(PNG).decode()})
+    img = client.get("/latest-image")
+    assert img.status_code == 200 and img.content == PNG
+    assert img.headers["content-type"] == "image/png"
+
+    async def first_chunk():
+        resp = await main.events()
+        chunk = await resp.body_iterator.__anext__()
+        await resp.body_iterator.aclose()
+        return chunk
+
+    chunk = asyncio.run(first_chunk())
+    assert '"replay": true' in chunk
+    assert f'"image_url": "/latest-image?id={r.json()["id"]}"' in chunk
+    assert not main.subscribers
+
+
+def test_latest_image_requires_token(monkeypatch):
+    monkeypatch.setattr(main, "APP_TOKEN", "secret")
+    assert TestClient(main.app).get("/latest-image?token=wrong").status_code == 401
